@@ -8,7 +8,7 @@ import torch
 import numpy as np
 import os
 import time
-
+import pickle
 
 DATA_DIRECTORY = os.path.join(os.getcwd(), 'models')
 MODEL = 'voidful/albert_chinese_tiny'
@@ -42,47 +42,65 @@ print(model)
 
 
 
-def generate_data_loaders():
+def generate_data_loaders(load):
 
-    with open('query.txt.ground_truth', 'r') as f:
-        lines = [eval(line) for line in f.readlines()] # 变成字典
-    
-    # 自动构造[CLS] SEQ_A [SEP] SEQ_B [SEP] 的输入格式 
-    # https://blog.csdn.net/qq_34418352/article/details/106069042
-    # https://huggingface.co/transformers/internal/tokenization_utils.html?highlight=encode_plus#transformers.tokenization_utils_base.PreTrainedTokenizerBase.encode_plus
-    # 返回一个字典 d
-    # d['input_ids'] == [101, x..., 102, y..., 102]
-    # d['token_type_ids'] = [0,..., 0, 1, ...,1]
-    # d['attention_mask'] = [1,1,1, ..., 0] pad的为0
-    X = [ tokenizer.encode_plus(line['query'], line['summary'], max_length=MAX_LEN, padding='max_length', truncation='longest_first', return_tensors=None) for line in lines]
-    X = [ [dic['input_ids'], dic['token_type_ids'], dic['attention_mask']] for dic in X]
-    Y = [ int(line['label']) for line in lines ]
-    
-    # stratify=Y,使训练集中Y的分布和全量数据中Y的分布一致，用于类分布不平衡的情况，不指定则类标签比例随机
-    X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, random_state=0, stratify=Y) 
+    if load == True:
+        with open('train_dataloader.pkl', 'rb') as f1:
+            train_dataloader = pickle.load(f1)
+        
+        with open('test_dataloader.pkl', 'rb') as f2:
+            test_dataloader = pickle.load(f2)
+    else:
+        with open('query.txt.ground_truth', 'r') as f:
+            lines = [eval(line) for line in f.readlines()] # 变成字典
+        
+        # 自动构造[CLS] SEQ_A [SEP] SEQ_B [SEP] 的输入格式 
+        # https://blog.csdn.net/qq_34418352/article/details/106069042
+        # https://huggingface.co/transformers/internal/tokenization_utils.html?highlight=encode_plus#transformers.tokenization_utils_base.PreTrainedTokenizerBase.encode_plus
+        # 返回一个字典 d
+        # d['input_ids'] == [101, x..., 102, y..., 102]
+        # d['token_type_ids'] = [0,..., 0, 1, ...,1]
+        # d['attention_mask'] = [1,1,1, ..., 0] pad的为0
+        X = [ tokenizer.encode_plus(line['query'], line['summary'], max_length=MAX_LEN, padding='max_length', truncation='longest_first', return_tensors=None) for line in lines]
+        X = [ [dic['input_ids'], dic['token_type_ids'], dic['attention_mask']] for dic in X]
+        Y = [ int(line['label']) for line in lines ]
+        
+        # stratify=Y,使训练集中Y的分布和全量数据中Y的分布一致，用于类分布不平衡的情况，不指定则类标签比例随机
+        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, random_state=0, stratify=Y) 
 
-    X_train_input_ids = torch.tensor([item[0] for item in X_train], dtype=torch.long)
-    X_train_token_type_ids = torch.tensor([item[1] for item in X_train], dtype=torch.long)
-    X_train_attention_mask = torch.tensor([item[2] for item in X_train], dtype=torch.long)
-    Y_train = torch.tensor(Y_train, dtype=torch.long)
+        X_train_input_ids = torch.tensor([item[0] for item in X_train], dtype=torch.long)
+        X_train_token_type_ids = torch.tensor([item[1] for item in X_train], dtype=torch.long)
+        X_train_attention_mask = torch.tensor([item[2] for item in X_train], dtype=torch.long)
+        Y_train = torch.tensor(Y_train, dtype=torch.long)
 
-    X_test_input_ids = torch.tensor([item[0] for item in X_test], dtype=torch.long)
-    X_test_token_type_ids = torch.tensor([item[1] for item in X_test], dtype=torch.long)
-    X_test_attention_mask = torch.tensor([item[2] for item in X_test], dtype=torch.long)
-    Y_test = torch.tensor(Y_test)
+        X_test_input_ids = torch.tensor([item[0] for item in X_test], dtype=torch.long)
+        X_test_token_type_ids = torch.tensor([item[1] for item in X_test], dtype=torch.long)
+        X_test_attention_mask = torch.tensor([item[2] for item in X_test], dtype=torch.long)
+        Y_test = torch.tensor(Y_test)
 
-    train_dataset = TensorDataset(X_train_input_ids, X_train_token_type_ids, X_train_attention_mask, Y_train)
-    test_dataset = TensorDataset(X_test_input_ids, X_test_token_type_ids, X_test_attention_mask, Y_test)
-    
-    train_dataloader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=TRAIN_BATCH_SIZE)
-    test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=TEST_BATCH_SIZE)
+        train_dataset = TensorDataset(X_train_input_ids, X_train_token_type_ids, X_train_attention_mask, Y_train)
+        test_dataset = TensorDataset(X_test_input_ids, X_test_token_type_ids, X_test_attention_mask, Y_test)
+        
+        train_dataloader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=TRAIN_BATCH_SIZE)
+        test_dataloader = DataLoader(test_dataset, sampler=SequentialSampler(test_dataset), batch_size=TEST_BATCH_SIZE)
+
+        with open('train_dataloader.pkl', 'wb') as f1:
+            pickle.dump(train_dataloader, f1)
+        
+        with open('test_dataloader.pkl', 'wb') as f2:
+            pickle.dump(test_dataloader, f2)
 
     return train_dataloader, test_dataloader
 
 def train():
     # 获取数据
     print('start getting data')
-    train_dataloader, test_dataloader = generate_data_loaders()
+
+    # train_dataloader, test_dataloader = generate_data_loaders(load=False)
+    # exit()
+
+    train_dataloader, test_dataloader = generate_data_loaders(load=True)
+
     # 配置模型信息
     print('start configuring model')
     loss_function = torch.nn.CrossEntropyLoss()
