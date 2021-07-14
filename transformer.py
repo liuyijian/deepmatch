@@ -5,44 +5,30 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score
 from torch.utils.data import TensorDataset, DataLoader, SequentialSampler, RandomSampler
 import torch
+import onnxruntime
 import numpy as np
 import os
 import time
 import pickle
 
+
+# 配置
 DATA_DIRECTORY = os.path.join(os.getcwd(), 'models')
 MODEL = 'voidful/albert_chinese_tiny'
 CACHE_DIRECTORY = os.path.join(DATA_DIRECTORY, 'pretrained_models_cache')
 CHECKPOINT_DIRECTORY = os.path.join(DATA_DIRECTORY, 'trained_models')
-TRAIN_BATCH_SIZE = 16
+TRAIN_BATCH_SIZE = 32
 TEST_BATCH_SIZE = 256
 MAX_LEN = 128
-EPOCHS = 1
+EPOCHS = 5
 WEIGHT_DECAY = 0.01
 LRATE = 2e-5
 LOG_INTERVAL = 100
-# DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-DEVICE = 'cpu'
-
-# 由於 albert_chinese_tiny 模型沒有用 sentencepiece，用AlbertTokenizer會載不進詞表，因此需要改用BertTokenizer
-tokenizer = BertTokenizerFast.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY)
-# 此model是pytorch模型的子类，可以保存成支持C++调用的形式
-model = AlbertForSequenceClassification.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, num_labels=4)
-model.to(DEVICE)
-print(model)
-
-# 保存成支持C++调用的模型
-
-# example = torch.rand(1, 3, 224, 224)
-# Use torch.jit.trace to generate a torch.jit.ScriptModule via tracing.
-# traced_script_module = torch.jit.trace(model, example)
-# Once you have a ScriptModule in your hands, either from tracing or annotating a PyTorch model, you are ready to serialize it to a file. 
-# Later on, you’ll be able to load the module from this file in C++ and execute it without any dependency on Python. 
-# traced_script_module.save('traced_albert_chinese_tiny.pt')
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+# DEVICE = 'cpu'
 
 
-
-def generate_data_loaders(load):
+def generate_data_loaders(load, tokenizer):
 
     if load == True:
         with open('train_dataloader.pkl', 'rb') as f1:
@@ -68,6 +54,7 @@ def generate_data_loaders(load):
         # stratify=Y,使训练集中Y的分布和全量数据中Y的分布一致，用于类分布不平衡的情况，不指定则类标签比例随机
         X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, random_state=0, stratify=Y) 
 
+        # https://pytorch.org/docs/stable/tensors.html 
         X_train_input_ids = torch.tensor([item[0] for item in X_train], dtype=torch.long)
         X_train_token_type_ids = torch.tensor([item[1] for item in X_train], dtype=torch.long)
         X_train_attention_mask = torch.tensor([item[2] for item in X_train], dtype=torch.long)
@@ -92,19 +79,91 @@ def generate_data_loaders(load):
 
     return train_dataloader, test_dataloader
 
-def train():
-    # 获取数据
+
+def train(model, dataloader, optimizer, scheduler, epoch):
+    model.train()
+    loss_vec = []
+    for step, batch in enumerate(dataloader):
+        batch = tuple(t.to(DEVICE, dtype=torch.long) for t in batch)
+        input_ids, token_type_ids, attention_mask, labels = batch
+        outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs[0]
+        loss_vec.append(loss.item())
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+        if step % LOG_INTERVAL == 0:
+            print(f'Epoch: {epoch} \t Step:{step} \t Average Loss:{np.mean(loss_vec):.4f}')
+            loss_vec = []
+
+
+def test(model, dataloader, mode='batch'):
+    # 测试
+    model.eval()
+    pred_correct_samples, total_samples = 0, 0
+    original_labels, predicted_labels = [], []
+    for batch in dataloader:
+        T_start = time.perf_counter()
+        batch = tuple(t.to(DEVICE, dtype=torch.long) for t in batch)
+        input_ids, token_type_ids, attention_mask, labels = batch
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
+            _, predictions = torch.max(outputs[0], dim=1)
+        # out_logits = outputs[0].detach().cpu().numpy()
+        # predictions = np.argmax(out_logits, axis=1)
+        T_end = time.perf_counter()
+        # print(f'inference time (batchsize {TEST_BATCH_SIZE}): {1000 * (T_end - T_start) } ms')
+        pred_correct_samples += (predictions == labels).sum().item()
+        total_samples += labels.size(0)
+        original_labels.extend(labels.tolist())
+        predicted_labels.extend(predictions.tolist())
+
+    accuracy = pred_correct_samples / total_samples
+    f1 = f1_score(original_labels, predicted_labels, average="macro")
+    print(f'Accuracy: [{pred_correct_samples}/{total_samples}] {accuracy:.4f}\n')
+    print(f'f1_score: {f1:.4f}\n')
+    return accuracy
+
+
+def benchmark():
+    tokenizer = BertTokenizerFast.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True) 
+    model = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth')
+    
+    docs = ['北京的天气从来都不好，但是我们取就打开了索科洛夫克拉的手放开的撒开了防晒第六课']*256
+
+    query = '北京的天气'
+
+    T_start = time.perf_counter()
+    X = tokenizer.batch_encode_plus([(query,doc) for doc in docs], max_length=MAX_LEN, padding='max_length', truncation='longest_first', return_tensors='pt')
+    
+    input_ids = X['input_ids'].to(DEVICE)
+    token_type_ids = X['token_type_ids'].to(DEVICE)
+    attention_mask = X['attention_mask'].to(DEVICE)
+
+    outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
+    big_value, prediction_type = torch.max(outputs[0], dim=1)
+    print(prediction_type)
+    T_end = time.perf_counter()
+    print(f'inference time (batchsize {TEST_BATCH_SIZE}): {1000 * (T_end - T_start) } ms')
+
+
+def run():
+    # 1、加载预训练模型和tokenizer
+    print('start loading pretrain-model and tokenizer')
+    tokenizer = BertTokenizerFast.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True) # 由於 albert_chinese_tiny 模型沒有用 sentencepiece，用AlbertTokenizer會載不進詞表，因此需要改用BertTokenizer
+    model = AlbertForSequenceClassification.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True, num_labels=4) # 此model是pytorch模型的子类，可以保存成支持C++调用的形式
+    model.to(DEVICE)
+    # print(model)
+
+    # 2、获取数据
     print('start getting data')
+    train_dataloader, test_dataloader = generate_data_loaders(load=True, tokenizer=tokenizer)
 
-    # train_dataloader, test_dataloader = generate_data_loaders(load=False)
-    # exit()
-
-    train_dataloader, test_dataloader = generate_data_loaders(load=True)
-
-    # 配置模型信息
+    # 3、配置训练信息
     print('start configuring model')
     loss_function = torch.nn.CrossEntropyLoss()
-    warmup_steps = int(0.1 * len(train_dataloader))
+    warmup_steps = int(0.2 * len(train_dataloader))
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_parameters = [
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': WEIGHT_DECAY},
@@ -112,72 +171,38 @@ def train():
     ]
     optimizer = AdamW(optimizer_parameters, lr=LRATE, eps=1e-8)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=len(train_dataloader) * EPOCHS)
-    # 迭代模型
+    
+    # 4、迭代模型
     print('start training model')
-    f1_benchmark = 0
+    accuracy_benchmark = 0.0
     model_to_save = None
     for epoch in range(1, EPOCHS + 1):
-        # 训练
-        model.train()
-        loss_vec = []
-        for step, batch in enumerate(train_dataloader):
-            batch = tuple(t.to(DEVICE, dtype=torch.long) for t in batch)
-            input_ids, token_type_ids, attention_mask, labels = batch
-            outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, labels=labels)
-            loss = outputs[0]
-            loss_vec.append(loss.item())
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-
-            if step % LOG_INTERVAL == 0:
-                print(f'Epoch: {epoch} \t Step:{step} \t Average Loss:{np.mean(loss_vec):.4f}')
-                loss_vec = []
-        # 测试
-        model.eval()
-        pred_correct_samples, total_samples = 0, 0
-        original_labels = []
-        predicted_labels = []
-        for batch in test_dataloader:
-            T_start = time.perf_counter()
-            batch = tuple(t.to(DEVICE, dtype=torch.long) for t in batch)
-            input_ids, token_type_ids, attention_mask, labels = batch
-            with torch.no_grad():
-                # T_start = time.perf_counter()
-                outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
-                # T_end = time.perf_counter()
-                # print(f'inference time (batchsize {TEST_BATCH_SIZE}): {1000 * (T_end - T_start) } ms')
-            out_logits = outputs[0].detach().cpu().numpy()
-            predictions = np.argmax(out_logits, axis=1)
-            T_end = time.perf_counter()
-            print(f'inference time (batchsize {TEST_BATCH_SIZE}): {1000 * (T_end - T_start) } ms')
-            labels = labels.to('cpu').numpy()
-            pred_correct_samples += np.sum(predictions == labels)
-            total_samples += len(labels)
-            original_labels.extend(labels)
-            predicted_labels.extend(predictions)
-    
-        accuracy = pred_correct_samples / total_samples
-        f1 = f1_score(original_labels, predicted_labels, average="macro")
-        print(f'Accuracy: [{pred_correct_samples}/{total_samples}] {accuracy:.4f}\n')
-        print(f'f1_score: {f1:.4f}\n')
-
-       
-        if f1 > f1_benchmark:
+        train(model, train_dataloader, optimizer, scheduler, epoch)
+        accuracy = test(model, test_dataloader)
+        if accuracy > accuracy_benchmark:
             model_to_save = model
-    # 保存
-    # if model_to_save:
-    #     model_to_save.save(f'.pt')   
-
-def test():
-    pass
-
-
+            accuracy_benchmark = accuracy
+    torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth') 
+    print('Size(MB)',os.path.getsize(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth') / (1024*1024))
     
+    # 5、模型量化 Ref：https://github.com/microsoft/onnxruntime/blob/master/onnxruntime/python/tools/quantization/notebooks/bert/Bert-GLUE_OnnxRuntime_quantization.ipynb
+    print('start quantized model')
+    pytorch_model = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth')
+    # quantized_pytorch_model = torch.quantization.quantize_dynamic(
+    #     pytorch_model, 
+    #     {torch.nn.Linear},
+    #     dtype=torch.qint8
+    # )
+    
+    # # test(quantized_pytorch_model, test_dataloader)
+    # torch.save(quantized_pytorch_model, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned-quantized.pth')
+    # print('Size(MB)',os.path.getsize(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned-quantized.pth') / (1024*1024))
+    # 6、模型导出为onnx 
+
+
 if __name__ == '__main__':
-    train()
-    test()
+    # run()
+    benchmark()
 
 
 
