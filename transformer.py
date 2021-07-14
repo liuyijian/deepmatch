@@ -18,7 +18,7 @@ MODEL = 'voidful/albert_chinese_tiny'
 CACHE_DIRECTORY = os.path.join(DATA_DIRECTORY, 'pretrained_models_cache')
 CHECKPOINT_DIRECTORY = os.path.join(DATA_DIRECTORY, 'trained_models')
 TRAIN_BATCH_SIZE = 32
-TEST_BATCH_SIZE = 256
+TEST_BATCH_SIZE = 128
 MAX_LEN = 128
 EPOCHS = 5
 WEIGHT_DECAY = 0.01
@@ -26,6 +26,28 @@ LRATE = 2e-5
 LOG_INTERVAL = 100
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 # DEVICE = 'cpu'
+
+class BertInferenceModel(torch.nn.Module):
+    def __init__(self):
+        super(MyBertModel, self).__init__()
+        self.max_len = MAX_LEN
+        self.device = DEVICE
+        # 由於 albert_chinese_tiny 模型沒有用 sentencepiece，用AlbertTokenizer會載不進詞表，因此需要改用BertTokenizer
+        self.tokenizer = BertTokenizerFast.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True)
+        # 此model是pytorch模型的子类，可以保存成支持C++调用的形式
+        self.bert = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth').to(DEVICE)
+        self.bert.eval()
+        # self.bert = AlbertForSequenceClassification.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True, num_labels=4).to(DEVICE)
+    def forward(self, sentence1, sentence2s):
+        X = self.tokenizer.batch_encode_plus([(sentence1,sentence2) for sentence2 in sentence2s], max_length=self.max_len, padding='max_length', truncation='longest_first', return_tensors='pt')
+        input_ids = X['input_ids'].to(self.device)
+        token_type_ids = X['token_type_ids'].to(self.device)
+        attention_mask = X['attention_mask'].to(self.device)
+        outputs = self.bert(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
+        _, results = torch.max(outputs[0], dim=1)
+        return results
+
+
 
 
 def generate_data_loaders(load, tokenizer):
@@ -127,25 +149,25 @@ def test(model, dataloader, mode='batch'):
 
 
 def benchmark():
-    tokenizer = BertTokenizerFast.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True) 
-    model = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth')
+    # tokenizer = BertTokenizerFast.from_pretrained(MODEL, cache_dir=CACHE_DIRECTORY, local_files_only=True) 
+    # model = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth')
     
-    docs = ['北京的天气从来都不好，但是我们取就打开了索科洛夫克拉的手放开的撒开了防晒第六课']*256
-
+    docs = ['北京的天气从来都不好，但是我们取就打开了索科洛夫克拉的手放开的撒开了防晒第六课'] * TEST_BATCH_SIZE
     query = '北京的天气'
 
-    T_start = time.perf_counter()
-    X = tokenizer.batch_encode_plus([(query,doc) for doc in docs], max_length=MAX_LEN, padding='max_length', truncation='longest_first', return_tensors='pt')
-    
-    input_ids = X['input_ids'].to(DEVICE)
-    token_type_ids = X['token_type_ids'].to(DEVICE)
-    attention_mask = X['attention_mask'].to(DEVICE)
+    bert_inference_model = BertInferenceModel()
 
-    outputs = model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask)
-    big_value, prediction_type = torch.max(outputs[0], dim=1)
-    print(prediction_type)
-    T_end = time.perf_counter()
-    print(f'inference time (batchsize {TEST_BATCH_SIZE}): {1000 * (T_end - T_start) } ms')
+    # 性能评测，batchsize=128时， GPU 跑的时间第一次为600ms，后面为80ms
+    for i in range(10):
+        T_start = time.perf_counter()
+        with torch.no_grad():
+            prediction_type = bert_inference_model(query, docs)
+            print(prediction_type)
+        T_end = time.perf_counter()
+        print(f'inference time (batchsize {TEST_BATCH_SIZE}): {1000 * (T_end - T_start) } ms')
+
+    # 保存模型
+    # torch.onnx.export(bert_inference_model, 'albert-tiny-zh-finetuned-inference.onnx')
 
 
 def run():
@@ -183,6 +205,9 @@ def run():
             model_to_save = model
             accuracy_benchmark = accuracy
     torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth') 
+    # 保存模型时
+    torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned_for_low_version.pth', _use_new_zipfile_serialization=False)
+
     print('Size(MB)',os.path.getsize(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth') / (1024*1024))
     
     # 5、模型量化 Ref：https://github.com/microsoft/onnxruntime/blob/master/onnxruntime/python/tools/quantization/notebooks/bert/Bert-GLUE_OnnxRuntime_quantization.ipynb
@@ -201,8 +226,12 @@ def run():
 
 
 if __name__ == '__main__':
+
     # run()
     benchmark()
+    # model = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth')
+    # torch.save(model, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned_for_low_version.pth', _use_new_zipfile_serialization=False)
+
 
 
 
