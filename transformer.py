@@ -180,7 +180,7 @@ def run():
 
     # 2、获取数据
     print('start getting data')
-    train_dataloader, test_dataloader = generate_data_loaders(load=True, tokenizer=tokenizer)
+    train_dataloader, test_dataloader = generate_data_loaders(load=False, tokenizer=tokenizer)
 
     # 3、配置训练信息
     print('start configuring model')
@@ -204,9 +204,9 @@ def run():
         if accuracy > accuracy_benchmark:
             model_to_save = model
             accuracy_benchmark = accuracy
-    torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth') 
+    torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned-full.pth') 
     # 保存模型时
-    torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned_for_low_version.pth', _use_new_zipfile_serialization=False)
+    torch.save(model_to_save, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned-full_for_low_version.pth', _use_new_zipfile_serialization=False)
 
     print('Size(MB)',os.path.getsize(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth') / (1024*1024))
     
@@ -227,8 +227,8 @@ def run():
 
 if __name__ == '__main__':
 
-    # run()
-    benchmark()
+    run()
+    # benchmark()
     # model = torch.load(f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned.pth')
     # torch.save(model, f'{CHECKPOINT_DIRECTORY}/albert-tiny-zh-finetuned_for_low_version.pth', _use_new_zipfile_serialization=False)
 
